@@ -288,20 +288,26 @@ async def fun():
     global refreshTimer
 
     # Check all timers for end time
+    # First pass: identify expired timers
+    expired_timers = []
     for keys in timersKey:
         list = timersKey.get(keys)
         readyCheck = (time.time() / 60) - list[1]
 
-        # if the timer is up send message to same guild it came from. (using context in dict)
+        # if the timer is up, add to expired list
         if (readyCheck >= list[0]):
-            print(keys.name + 'is ready')
-            timersKey.pop(keys)  # detele the dictionary value
-            print(timersKey)
-            channel = list[2]  # get contect from dictionary
-            await channel.send(f"{keys.mention} needs to start playing {DEFAULT_GAME} right fucking now")  # send message
-            return
+            expired_timers.append(keys)
         else:
             print(readyCheck)
+
+    # Second pass: process and remove expired timers
+    for keys in expired_timers:
+        list = timersKey.get(keys)
+        print(keys.name + ' is ready')
+        timersKey.pop(keys)  # delete the dictionary value
+        print(timersKey)
+        channel = list[2]  # get context from dictionary
+        await channel.send(f"{keys.mention} needs to start playing {DEFAULT_GAME} right fucking now")  # send message
         
 
     #refresh access token every 50 minutes
