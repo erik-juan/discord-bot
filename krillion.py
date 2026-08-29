@@ -282,25 +282,18 @@ class KrillionStore(object):
                     pass
 
     def run_retention(self, now=None):
-        """Drop everything from earlier windows.
+        """Drop the scores from earlier windows and return whether anything reset.
 
-        Returns the boards that were showing the expired scores so the caller can
-        delete those messages from Discord.
+        Boards from previous days are forgotten rather than deleted, so the last
+        leaderboard of each day stays in the channel as a record of the scores.
         """
         window = current_window_key(now)
         if self.data.get('window') == window:
-            return []
-
-        stale = []
-        for guild in self.data.get('guilds', {}).values():
-            for puzzle in guild.get('puzzles', {}).values():
-                board = puzzle.get('board')
-                if board:
-                    stale.append(board)
+            return False
 
         self.data = self._empty(window)
         self.save()
-        return stale
+        return True
 
     def _puzzle_bucket(self, guild_id, puzzle, create=False):
         guilds = self.data.setdefault('guilds', {})

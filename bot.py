@@ -92,7 +92,7 @@ async def on_ready():
     # catch up on any reset that was missed while the bot was down
     try:
         krillionStore.load()
-        await purgeKrillionScores()
+        resetKrillionScores()
         krillionWindow = krillion.current_window_key()
     except Exception as error:
         print(f'Krillion: startup cleanup failed: {error}')
@@ -311,7 +311,7 @@ async def fun():
             currentWindow = krillion.current_window_key()
             if currentWindow != krillionWindow:
                 krillionWindow = currentWindow
-                await purgeKrillionScores()
+                resetKrillionScores()
         except Exception as error:
             print(f'Krillion: daily reset failed: {error}')
 
@@ -553,10 +553,11 @@ async def deleteKrillionBoard(board):
         print(f'Krillion: could not remove the previous leaderboard: {error}')
 
 
-# Drop scores from earlier days and clean up the boards that showed them
-async def purgeKrillionScores():
-    for board in krillionStore.run_retention():
-        await deleteKrillionBoard(board)
+# Start a new day of scores. Yesterday's final leaderboard is deliberately left in
+# the channel so the history of past scores survives.
+def resetKrillionScores():
+    if krillionStore.run_retention():
+        print('Krillion: starting a new day of scores')
 
 
 # Replace the running leaderboard with a freshly ranked one at the bottom of the channel
@@ -576,7 +577,7 @@ async def postKrillionBoard(channel, guildId, puzzle):
 
 # Take the score out of a shared result, bin the message and refresh the board
 async def handleKrillionScore(message, result):
-    await purgeKrillionScores()
+    resetKrillionScores()
 
     author = message.author
     krillionStore.record_score(

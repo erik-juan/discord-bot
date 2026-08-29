@@ -252,25 +252,29 @@ class RetentionTest(unittest.TestCase):
     def test_scores_are_kept_until_the_reset(self):
         self.seed('2026-08-29')
 
-        self.assertEqual(self.store.run_retention(mountain(2026, 8, 30, 21, 59)), [])
+        self.assertFalse(self.store.run_retention(mountain(2026, 8, 30, 21, 59)))
         self.assertEqual(len(self.store.get_entries(1, 45)), 1)
+        self.assertEqual(self.store.get_board(1, 45), {'channel_id': 900, 'message_id': 901})
 
     def test_scores_are_wiped_at_the_reset(self):
         self.seed('2026-08-29')
 
-        stale = self.store.run_retention(mountain(2026, 8, 30, 22, 0))
-
-        self.assertEqual(stale, [{'channel_id': 900, 'message_id': 901}])
+        self.assertTrue(self.store.run_retention(mountain(2026, 8, 30, 22, 0)))
         self.assertEqual(self.store.get_entries(1, 45), [])
-        self.assertIsNone(self.store.get_board(1, 45))
         self.assertEqual(self.store.data['window'], '2026-08-30')
+
+    def test_yesterdays_leaderboard_is_forgotten_rather_than_deleted(self):
+        self.seed('2026-08-29')
+        self.store.run_retention(mountain(2026, 8, 30, 22, 0))
+
+        # nothing points at the old message any more, so it stays in the channel
+        # as a record of yesterday's scores
+        self.assertIsNone(self.store.get_board(1, 45))
 
     def test_a_missed_reset_is_caught_up_on_the_next_check(self):
         self.seed('2026-08-01')
 
-        stale = self.store.run_retention(mountain(2026, 8, 30, 9, 0))
-
-        self.assertEqual(stale, [{'channel_id': 900, 'message_id': 901}])
+        self.assertTrue(self.store.run_retention(mountain(2026, 8, 30, 9, 0)))
         self.assertEqual(self.store.get_entries(1, 45), [])
 
     def test_a_wipe_is_written_to_disk(self):
