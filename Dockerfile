@@ -10,5 +10,6 @@ RUN ["python3", "-m", "pip", "install", "-r", "requirements.txt"]
 
 COPY bot.py bot.py
 COPY spotifyFunction.py spotifyFunction.py
+COPY krillion.py krillion.py
 
 CMD python bot.py

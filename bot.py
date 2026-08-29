@@ -7,6 +7,8 @@ import time
 import asyncio
 #Import Spotify functions
 from spotifyFunction import create_playlist, removePlaylist, AddSong, getURI, get_userplaylist, refreshAuthorization, playlist_songs
+#Import Krillion leaderboard functions
+import krillion
 
 DEFAULT_GAME = "the decided heckin game"
 
@@ -24,6 +26,10 @@ emojiResponse = []
 # start ontime at 0 and start an empty string for the playlist id
 playList = ""
 playListOnTime = 0
+
+# Krillion scores live on disk so a restart mid day keeps the leaderboard
+krillionStore = krillion.KrillionStore()
+krillionWindow = None
 
 emojiLetters = ["\N{REGIONAL INDICATOR SYMBOL LETTER A}",
                 "\N{REGIONAL INDICATOR SYMBOL LETTER B}",
@@ -81,6 +87,16 @@ async def on_ready():
     # create initial spotify playlist
     global playList
     global playListOnTime
+    global krillionWindow
+
+    # catch up on any reset that was missed while the bot was down
+    try:
+        krillionStore.load()
+        await purgeKrillionScores()
+        krillionWindow = krillion.current_window_key()
+    except Exception as error:
+        print(f'Krillion: startup cleanup failed: {error}')
+
     # read playlists
     playlistResponse = get_userplaylist(STOKEN, USER_ID)
     items = playlistResponse['items']
@@ -286,6 +302,18 @@ async def fun():
     global STOKEN
     global USER_ID
     global refreshTimer
+    global krillionWindow
+
+    # Wipe Krillion scores when the 10PM Mountain window rolls over. Guarded on the
+    # window key so this only touches the store once per day.
+    if bot.is_ready():
+        try:
+            currentWindow = krillion.current_window_key()
+            if currentWindow != krillionWindow:
+                krillionWindow = currentWindow
+                await purgeKrillionScores()
+        except Exception as error:
+            print(f'Krillion: daily reset failed: {error}')
 
     # Check all timers for end time
     # First pass: identify expired timers
@@ -509,6 +537,65 @@ async def change_game(ctx, *args):
 
 
 
+# Remove a leaderboard the bot posted earlier, if it is still there
+async def deleteKrillionBoard(board):
+    if not board:
+        return
+
+    channel = bot.get_channel(board.get('channel_id'))
+    if channel is None:
+        return
+
+    try:
+        oldBoard = await channel.fetch_message(board.get('message_id'))
+        await oldBoard.delete()
+    except discord.HTTPException as error:
+        print(f'Krillion: could not remove the previous leaderboard: {error}')
+
+
+# Drop scores from earlier days and clean up the boards that showed them
+async def purgeKrillionScores():
+    for board in krillionStore.run_retention():
+        await deleteKrillionBoard(board)
+
+
+# Replace the running leaderboard with a freshly ranked one at the bottom of the channel
+async def postKrillionBoard(channel, guildId, puzzle):
+    entries = krillionStore.get_entries(guildId, puzzle)
+    title, description, footer = krillion.build_leaderboard_content(puzzle, entries)
+
+    board = discord.Embed(title=title, description=description, colour=discord.Colour(0x1B4F72))
+    board.set_footer(text=footer)
+
+    await deleteKrillionBoard(krillionStore.get_board(guildId, puzzle))
+    krillionStore.clear_board(guildId, puzzle)
+
+    posted = await channel.send(embed=board, allowed_mentions=discord.AllowedMentions.none())
+    krillionStore.set_board(guildId, puzzle, channel.id, posted.id)
+
+
+# Take the score out of a shared result, bin the message and refresh the board
+async def handleKrillionScore(message, result):
+    await purgeKrillionScores()
+
+    author = message.author
+    krillionStore.record_score(
+        message.guild.id,
+        author.id,
+        author.display_name,
+        result['puzzle'],
+        result['score'],
+        result['emojis'],
+    )
+
+    try:
+        await message.delete()
+    except discord.HTTPException as error:
+        print(f'Krillion: could not delete the score message: {error}')
+
+    await postKrillionBoard(message.channel, message.guild.id, result['puzzle'])
+
+
 @bot.event
 async def on_message(message):
     global pollCreator
@@ -518,6 +605,15 @@ async def on_message(message):
     global fullResponse
     global emojiResponse
     global emojiLetters
+
+    # Krillion scores are claimed before the poll flow so a shared result is never
+    # mistaken for a poll question
+    if (not message.author.bot and message.guild is not None):
+        krillionResult = krillion.parse_krillion_message(message.content)
+        if krillionResult is not None:
+            await handleKrillionScore(message, krillionResult)
+            return
+
     if (str(message.author) == pollCreator):
         if (pollStep == 1):
             list = pollDict.get(pollCreator)
