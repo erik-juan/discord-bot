@@ -6,8 +6,15 @@ services:
 
     tty: true
     restart: unless-stopped
+    environment:
+      KRILLION_DATA_FILE: /data/krillion.json
     volumes:
       # attach a directory relative to the directory containing this compose file
       - /var/run/docker.sock:/var/run/docker.sock
       - /home/ubuntu/valheim:/valheim
       - /home/ubuntu/erik-combined-server:/minecraft
+      # keep today's Krillion scores across rebuilds and restarts
+      - krillion_data:/data
+
+volumes:
+  krillion_data:
