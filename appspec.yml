@@ -12,8 +12,6 @@ permissions:
       - file
   - object: /home/ubuntu/discord_bot/scripts
     pattern: "*.sh"
-    owner: ubuntu
-    group: ubuntu
     mode: 755
     type:
       - file
