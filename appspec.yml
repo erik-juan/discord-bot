@@ -10,11 +10,6 @@ permissions:
     type:
       - directory
       - file
-  - object: /home/ubuntu/discord_bot/scripts
-    pattern: "*.sh"
-    mode: 755
-    type:
-      - file
 hooks:
   ApplicationStart:
     - location: scripts/start-bot.sh
