@@ -1,4 +1,5 @@
 .env
+krillion.json
 ._*
 .DS_Store
 __pycache__/
