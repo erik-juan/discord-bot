@@ -7,6 +7,7 @@ connection. bot.py wraps the rendered text in an embed.
 import json
 import os
 import re
+import shutil
 import tempfile
 import time
 import unicodedata
@@ -83,11 +84,31 @@ def split_emoji_clusters(text):
     return clusters
 
 
+def leading_emoji_run(line):
+    """Return the run of result emoji starting a line, or None if it is not one.
+
+    Stops at the first ordinary character so a comment written next to the results
+    is ignored, while a run that is not exactly seven emoji is still rejected.
+    """
+    end = 0
+    for char in line:
+        if ord(char) < 128 or char.isspace():
+            break
+        end += 1
+
+    run = line[:end]
+    if not run or len(split_emoji_clusters(run)) != RESULT_COUNT:
+        return None
+
+    return run
+
+
 def parse_krillion_message(content):
     """Return a dict for a well-formed Krillion share, otherwise None.
 
-    Expects the four-part share exactly as the game produces it: header line,
-    score line, blank line, then the seven result emoji.
+    The share has to open with the four parts the game produces: header line,
+    score line, blank line, then the seven result emoji. Anything after those is
+    treated as the poster's own commentary and ignored.
     """
     if not content or '\U0001F990' not in content:
         return None
@@ -96,13 +117,11 @@ def parse_krillion_message(content):
 
     while lines and not lines[0]:
         lines.pop(0)
-    while lines and not lines[-1]:
-        lines.pop()
 
-    if len(lines) != 4:
+    if len(lines) < 4:
         return None
 
-    header, raw_score, separator, results = lines
+    header, raw_score, separator, results = lines[:4]
 
     if separator:
         return None
@@ -119,18 +138,14 @@ def parse_krillion_message(content):
     if score > MAX_SCORE:
         return None
 
-    # Any ASCII in the results line means it is prose, not a shared result.
-    if any(ord(char) < 128 for char in results):
-        return None
-
-    clusters = split_emoji_clusters(results)
-    if len(clusters) != RESULT_COUNT:
+    emojis = leading_emoji_run(results)
+    if emojis is None:
         return None
 
     return {
         'puzzle': int(header_match.group(1)),
         'score': score,
-        'emojis': results,
+        'emojis': emojis,
     }
 
 
@@ -228,17 +243,26 @@ class KrillionStore(object):
     def load(self):
         try:
             with open(self.path, 'r') as handle:
-                data = json.load(handle)
+                raw = handle.read()
         except IOError:
             self.data = self._empty()
             return self.data
+
+        # The deploy script creates the file up front so docker mounts it as a
+        # file rather than a directory, so an empty one just means "no scores yet".
+        if not raw.strip():
+            self.data = self._empty()
+            return self.data
+
+        try:
+            data = json.loads(raw)
         except ValueError as error:
             backup = '{}.corrupt-{}'.format(self.path, int(time.time()))
             print('Krillion: unreadable store ({}); preserving it at {}'.format(error, backup))
             try:
-                os.rename(self.path, backup)
-            except OSError as rename_error:
-                print('Krillion: could not preserve the unreadable store: {}'.format(rename_error))
+                shutil.copyfile(self.path, backup)
+            except (IOError, OSError) as copy_error:
+                print('Krillion: could not preserve the unreadable store: {}'.format(copy_error))
             self.data = self._empty()
             return self.data
 
@@ -252,26 +276,16 @@ class KrillionStore(object):
         self.data = data
         return self.data
 
-    def save(self):
-        directory = os.path.dirname(os.path.abspath(self.path))
-        handle = None
-        temp_path = None
+    def _write_atomically(self, directory, payload):
+        """Write beside the target and swap it in, so a crash mid-write cannot
+        leave a half-written leaderboard behind."""
+        handle, temp_path = tempfile.mkstemp(dir=directory, prefix='.krillion-', suffix='.json')
         try:
-            if directory and not os.path.isdir(directory):
-                os.makedirs(directory)
-            # Write beside the target and swap it in, so a crash mid-write cannot
-            # leave a half-written leaderboard behind.
-            handle, temp_path = tempfile.mkstemp(dir=directory, prefix='.krillion-', suffix='.json')
             with os.fdopen(handle, 'w') as stream:
                 handle = None
-                json.dump(self.data, stream)
+                stream.write(payload)
             os.replace(temp_path, self.path)
             temp_path = None
-            self.persistent = True
-        except (IOError, OSError) as error:
-            if self.persistent:
-                print('Krillion: could not write {} ({}); keeping scores in memory only'.format(self.path, error))
-            self.persistent = False
         finally:
             if handle is not None:
                 os.close(handle)
@@ -280,6 +294,30 @@ class KrillionStore(object):
                     os.remove(temp_path)
                 except OSError:
                     pass
+
+    def _write_in_place(self, payload):
+        with open(self.path, 'w') as stream:
+            stream.write(payload)
+            stream.flush()
+            os.fsync(stream.fileno())
+
+    def save(self):
+        directory = os.path.dirname(os.path.abspath(self.path))
+        payload = json.dumps(self.data)
+        try:
+            if directory and not os.path.isdir(directory):
+                os.makedirs(directory)
+            try:
+                self._write_atomically(directory, payload)
+            except OSError:
+                # When the file itself is a docker bind mount it is a mount point,
+                # and nothing can be renamed over it, so write through it instead.
+                self._write_in_place(payload)
+            self.persistent = True
+        except (IOError, OSError) as error:
+            if self.persistent:
+                print('Krillion: could not write {} ({}); keeping scores in memory only'.format(self.path, error))
+            self.persistent = False
 
     def run_retention(self, now=None):
         """Drop the scores from earlier windows and return whether anything reset.
