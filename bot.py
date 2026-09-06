@@ -27,6 +27,7 @@ timersKey = {}
 timeVals = []
 pollCreator = ""
 pollStep = 0
+pollPrompt = None
 charResp = "a"
 pollDict = {}
 fullResponse = ""
@@ -490,6 +491,7 @@ async def lib(ctx):
     global pollCreator
     global pollStep
     global pollDict
+    global pollPrompt
 
     if pollStep != 0:
         await ctx.send("Someone is already making a poll")
@@ -500,7 +502,7 @@ async def lib(ctx):
     pollStart = time.time() / 60
     pollEnd = pollStart + 60
     pollDict.update({pollCreator: [pollStart, pollEnd, ctx]})
-    await ctx.send(pollCreator + " please type a question")
+    pollPrompt = await ctx.send(pollCreator + " please type a question")
 
 
 # add song to spotify
@@ -633,6 +635,7 @@ async def on_message(message):
     global pollCreator
     global pollDict
     global pollStep
+    global pollPrompt
     global charResp
     global fullResponse
     global emojiResponse
@@ -652,18 +655,31 @@ async def on_message(message):
             (pollDict[pollCreator]).append(str(message.content))
             # print(list)
             await message.delete()
-            await message.channel.send("Type the responses separated by commas")
+            if pollPrompt:
+                await pollPrompt.delete()
+            pollPrompt = await message.channel.send(
+                "Type the responses separated by commas (up to 20)"
+            )
             pollStep = 2
             await bot.process_commands(message)
             return
         if pollStep == 2:
+            splitResponse = str(message.content).split(",")
+            if len(splitResponse) > 20:
+                await message.delete()
+                if pollPrompt:
+                    await pollPrompt.delete()
+                pollPrompt = await message.channel.send(
+                    "Polls can have at most 20 options. Type the responses separated by commas (up to 20)"
+                )
+                await bot.process_commands(message)
+                return
+
             (pollDict[pollCreator]).append(str(message.content))
             list = pollDict.get(pollCreator)
             # send the poll message
             print(list)
             question = list[3]
-            response = list[4]
-            splitResponse = response.split(",")
             print(splitResponse)
 
             fullResponse = "**" + question + "** \n"
@@ -679,8 +695,10 @@ async def on_message(message):
                 )
                 n += 1
 
-            chn = list[2]
             await message.delete()
+            if pollPrompt:
+                await pollPrompt.delete()
+                pollPrompt = None
             msg = await message.channel.send(fullResponse)
             y = 0
             for i in splitResponse:
