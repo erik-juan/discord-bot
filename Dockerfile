@@ -11,6 +11,6 @@ RUN python3 -m pip install --no-cache-dir -r requirements.txt
 COPY bot.py bot.py
 COPY spotifyFunction.py spotifyFunction.py
 COPY krillion.py krillion.py
-COPY GIT_SHA GIT_SHA
+COPY GIT_VERSION GIT_VERSION
 
 CMD python bot.py

@@ -17,8 +17,12 @@ jobs:
     steps:
       - uses: actions/checkout@v2
 
-      - name: Write git SHA
-        run: echo "${{ github.sha }}" > GIT_SHA
+      - name: Write git version
+        run: |
+          {
+            echo "${{ github.sha }}"
+            git log -1 --pretty=%s
+          } > GIT_VERSION
 
       # Install AWS CLI 2
       - name: Install AWS CLI 2

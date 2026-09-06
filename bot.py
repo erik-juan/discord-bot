@@ -90,17 +90,19 @@ print("Spotify is disabled; skipping token refresh")
 STARTED_AT = datetime.now(timezone.utc)
 
 
-def read_git_sha():
+def read_git_version():
     try:
-        sha = Path(__file__).with_name("GIT_SHA").read_text().strip().lower()
+        text = Path(__file__).with_name("GIT_VERSION").read_text().strip()
     except OSError:
-        return "unknown"
-    if len(sha) < 7:
-        return "unknown"
-    return sha
+        return "unknown", "unknown"
+
+    sha, _, message = text.partition("\n")
+    sha = sha.strip()
+    message = message.strip() or "unknown"
+    return sha, message
 
 
-GIT_SHA = read_git_sha()
+GIT_SHA, GIT_MESSAGE = read_git_version()
 
 # start bot
 intents = discord.Intents.all()
@@ -576,12 +578,13 @@ async def change_game(ctx, *args):
 
 @bot.command(name="version")
 async def version(ctx):
-    started = STARTED_AT.strftime("%Y-%m-%d %H:%M:%S UTC")
+    started = STARTED_AT.astimezone(krillion.MOUNTAIN).strftime("%Y-%m-%d %H:%M:%S %Z")
     uptime = datetime.now(timezone.utc) - STARTED_AT
     hours, rem = divmod(int(uptime.total_seconds()), 3600)
     minutes, seconds = divmod(rem, 60)
     await ctx.send(
-        f"Git: `{GIT_SHA[:7]}`\n"
+        f"Git: `{GIT_SHA}`\n"
+        f"Commit: {GIT_MESSAGE}\n"
         f"Started: **{started}**\n"
         f"Uptime: **{hours}h {minutes}m {seconds}s**"
     )
