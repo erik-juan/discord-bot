@@ -612,8 +612,8 @@ async def postKrillionBoard(channel, guildId, puzzle):
     krillionStore.set_board(guildId, puzzle, channel.id, posted.id)
 
 
-# Take the score out of a shared result and refresh the board. The original message
-# is left in the channel so people can reply to it.
+# Take the score out of a shared result, refresh the board, then remove the
+# original share so the channel only keeps the running scorecard.
 async def handleKrillionScore(message, result):
     resetKrillionScores()
 
@@ -628,6 +628,11 @@ async def handleKrillionScore(message, result):
     )
 
     await postKrillionBoard(message.channel, message.guild.id, result["puzzle"])
+
+    try:
+        await message.delete()
+    except discord.HTTPException as error:
+        print(f"Krillion: could not remove the shared result: {error}")
 
 
 @bot.event
