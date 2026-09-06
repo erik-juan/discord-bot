@@ -1,6 +1,8 @@
 import os
 import subprocess
 import time
+from datetime import datetime, timezone
+from pathlib import Path
 
 import discord
 import numpy as np
@@ -84,6 +86,21 @@ TOKEN = os.getenv("DISCORD_SECRET")
 # refreshTimer = time.time()
 # print("Token Refreshed")
 print("Spotify is disabled; skipping token refresh")
+
+STARTED_AT = datetime.now(timezone.utc)
+
+
+def read_git_sha():
+    try:
+        sha = Path(__file__).with_name("GIT_SHA").read_text().strip().lower()
+    except OSError:
+        return "unknown"
+    if len(sha) < 7:
+        return "unknown"
+    return sha
+
+
+GIT_SHA = read_git_sha()
 
 # start bot
 intents = discord.Intents.all()
@@ -554,6 +571,19 @@ async def change_game(ctx, *args):
     )
     subprocess.run(
         ["docker", "compose", "-f", f"/{chosen_game_name}/compose.yml", "up", "-d"]
+    )
+
+
+@bot.command(name="version")
+async def version(ctx):
+    started = STARTED_AT.strftime("%Y-%m-%d %H:%M:%S UTC")
+    uptime = datetime.now(timezone.utc) - STARTED_AT
+    hours, rem = divmod(int(uptime.total_seconds()), 3600)
+    minutes, seconds = divmod(rem, 60)
+    await ctx.send(
+        f"Git: `{GIT_SHA[:7]}`\n"
+        f"Started: **{started}**\n"
+        f"Uptime: **{hours}h {minutes}m {seconds}s**"
     )
 
 
