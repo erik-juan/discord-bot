@@ -1,13 +1,13 @@
 import os
 import subprocess
+import time
+
 import discord
 import numpy as np
 from discord.ext import (
     commands,
     tasks,
 )  # Commands for bot listening, tasks TODO outside of commands
-import time
-import asyncio
 
 # Import Spotify functions
 # SPOTIFY DISABLED: the refresh token was revoked and Spotify only issues a new one
@@ -15,7 +15,6 @@ import asyncio
 # Spotify back on, put a fresh REFRESH_TOKEN in .env and uncomment this import
 # along with every other block marked "SPOTIFY DISABLED".
 # from spotifyFunction import create_playlist, removePlaylist, AddSong, getURI, get_userplaylist, refreshAuthorization, playlist_songs
-
 # Import Krillion leaderboard functions
 import krillion
 
@@ -24,7 +23,6 @@ DEFAULT_GAME = "the decided heckin game"
 # initialize dictionaries and lists for later
 people = {}
 timersKey = {}
-timeVals = []
 pollCreator = ""
 pollStep = 0
 pollPrompt = None
@@ -33,9 +31,9 @@ pollDict = {}
 fullResponse = ""
 emojiResponse = []
 
-# start ontime at 0 and start an empty string for the playlist id
-playList = ""
-playListOnTime = 0
+# SPOTIFY DISABLED
+# playList = ""
+# playListOnTime = 0
 
 # Krillion scores live on disk so a restart mid day keeps the leaderboard
 krillionStore = krillion.KrillionStore()
@@ -72,10 +70,11 @@ emojiLetters = [
 
 # get tokens
 TOKEN = os.getenv("DISCORD_SECRET")
-USER_ID = os.getenv("USER_ID")
-CLIENT_ID = os.getenv("CLIENT_ID")
-REFRESH_TOKEN = os.getenv("REFRESH_TOKEN")
-CLIENT_SECRET = os.getenv("CLIENT_SECRET")
+# SPOTIFY DISABLED
+# USER_ID = os.getenv("USER_ID")
+# CLIENT_ID = os.getenv("CLIENT_ID")
+# REFRESH_TOKEN = os.getenv("REFRESH_TOKEN")
+# CLIENT_SECRET = os.getenv("CLIENT_SECRET")
 
 
 # get spotify token
@@ -86,9 +85,8 @@ CLIENT_SECRET = os.getenv("CLIENT_SECRET")
 # print("Token Refreshed")
 print("Spotify is disabled; skipping token refresh")
 
-# start client and bot
+# start bot
 intents = discord.Intents.all()
-client = discord.Client()
 # set bot prefix and give intents
 bot = commands.Bot(command_prefix="/", intents=intents)  # bot will listen for "/"
 
@@ -96,10 +94,10 @@ bot = commands.Bot(command_prefix="/", intents=intents)  # bot will listen for "
 @bot.event  # print when connected and start a spotify playlist is not created already
 async def on_ready():
     print(f"{bot.user.name} has connected to Discord!")
-    # create initial spotify playlist
-    global playList
-    global playListOnTime
     global krillionWindow
+    # SPOTIFY DISABLED
+    # global playList
+    # global playListOnTime
 
     # catch up on any reset that was missed while the bot was down
     try:
@@ -150,7 +148,7 @@ async def on_ready():
 async def rolling(ctx):
     me = ctx.message.content
     nugNumber = me.replace("/nug", "")
-    nugNumber.strip()
+    nugNumber = nugNumber.strip()
     if nugNumber == "":
         await ctx.send("<:nugget:724445623906205756>")
     else:
@@ -165,20 +163,11 @@ async def rolling(ctx):
 @bot.command(name="rollforgold")  # look for prefix+'roll'
 async def rolling(ctx):
     print("Rolling for Gold")
-    number = str(np.random.randint(1, 100))  # find random number
-    author = str(ctx.message.author)  # get author
-    author = author[:-5]  # delete author number
-
-    response = "**" + author + " rolls a " + number + "**"  # Create response
-    # await ctx.send(response)  # Send response
-    # Print online members
-    i = 1
-    print((ctx.guild.members))
+    print(ctx.guild.members)
     for user in ctx.guild.members:
         if user.status == discord.Status.online:
             if user.name != "Weenie Bot General":
                 number = str(np.random.randint(1, 100))
-                num = str(user.id)
                 ask = "*" + user.name + " rolls a " + number + "*"
                 print(ask)
                 await ctx.send(ask)
@@ -202,7 +191,6 @@ async def shots(ctx):
     me = me.replace("/shot ", "")
     me = me.replace("/shot", "")
 
-    me.lower()  # set to lower case
     print(me)
     while me == "":
         await ctx.send("Please give a name")  # send response
@@ -252,7 +240,6 @@ async def lib(ctx):
     me = str(ctx.message.content)  # read message
     me = me.lower()  # set to lower case
     # take out the bot command from text
-    min = int(str(me.replace("/giveme ", "")))
     min = int(str(me.replace("/giveme", "")))
 
     minStr = str(min)
@@ -314,9 +301,9 @@ async def lib(ctx):
 @tasks.loop(seconds=1)
 async def fun():
     global timersKey
-    global playList
-    global playListOnTime
     # SPOTIFY DISABLED
+    # global playList
+    # global playListOnTime
     # global STOKEN
     # global USER_ID
     # global refreshTimer
@@ -644,7 +631,6 @@ async def on_message(message):
     global charResp
     global fullResponse
     global emojiResponse
-    global emojiLetters
 
     # Krillion scores are claimed before the poll flow so a shared result is never
     # mistaken for a poll question
@@ -656,9 +642,7 @@ async def on_message(message):
 
     if str(message.author) == pollCreator:
         if pollStep == 1:
-            list = pollDict.get(pollCreator)
             (pollDict[pollCreator]).append(str(message.content))
-            # print(list)
             await message.delete()
             if pollPrompt:
                 await pollPrompt.delete()
@@ -707,15 +691,12 @@ async def on_message(message):
             msg = await message.channel.send(fullResponse)
             y = 0
             for i in splitResponse:
-                emojiResponse[y].replace("_", " ")
-                emojiResponse[y].upper()
                 await msg.add_reaction(
                     emojiLetters[y]
                 )  # need to figure out this unicode thing
                 y += 1
 
             pollStep = 0
-            n = 0
 
     else:
         await bot.process_commands(message)
