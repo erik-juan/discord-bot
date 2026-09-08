@@ -1,3 +1,4 @@
+import asyncio
 import os
 import subprocess
 import time
@@ -40,6 +41,12 @@ emojiResponse = []
 # Krillion scores live on disk so a restart mid day keeps the leaderboard
 krillionStore = krillion.KrillionStore()
 krillionWindow = None
+
+# The weekly rollup reads a week of channel history, so it is kept well clear of the
+# one second loop: never two at once, and a failed attempt waits before trying again.
+KRILLION_WEEKLY_RETRY_SECONDS = 300
+krillionWeeklyChecked = 0.0
+krillionWeeklyRunning = False
 
 emojiLetters = [
     "\N{REGIONAL INDICATOR SYMBOL LETTER A}",
@@ -327,6 +334,8 @@ async def fun():
     # global USER_ID
     # global refreshTimer
     global krillionWindow
+    global krillionWeeklyChecked
+    global krillionWeeklyRunning
 
     # Wipe Krillion scores when the 10PM Mountain window rolls over. Guarded on the
     # window key so this only touches the store once per day.
@@ -338,6 +347,18 @@ async def fun():
                 resetKrillionScores()
         except Exception as error:
             print(f"Krillion: daily reset failed: {error}")
+
+    # Post the weekly rollup once Monday 10PM Mountain has passed. Reading a week of
+    # history takes seconds, so it runs off to the side instead of holding up the
+    # timers below, and the flag keeps a slow run from being started twice.
+    if (
+        bot.is_ready()
+        and not krillionWeeklyRunning
+        and time.time() - krillionWeeklyChecked > KRILLION_WEEKLY_RETRY_SECONDS
+    ):
+        krillionWeeklyChecked = time.time()
+        krillionWeeklyRunning = True
+        asyncio.ensure_future(krillionWeekly())
 
     # Check all timers for end time
     # First pass: identify expired timers
@@ -653,6 +674,171 @@ async def handleKrillionScore(message, result):
         await message.delete()
     except discord.HTTPException as error:
         print(f"Krillion: could not remove the shared result: {error}")
+
+
+# Weekly leaderboards go wherever the daily ones went
+def resolveKrillionChannel(guild):
+    channelId = krillionStore.get_meta(guild.id, "last_board_channel_id")
+    if channelId is None:
+        return None
+
+    channel = guild.get_channel(channelId)
+    if channel is None:
+        return None
+
+    allowed = channel.permissions_for(guild.me)
+    if not (allowed.read_message_history and allowed.send_messages):
+        return None
+
+    return channel
+
+
+def readableKrillionChannels(guild):
+    return [
+        channel
+        for channel in guild.text_channels
+        if channel.permissions_for(guild.me).read_message_history
+    ]
+
+
+# Names on an old board are plain text, so match them back to members where we can
+# and let anyone ambiguous stay keyed by the name itself
+def krillionNameLookup(guild):
+    lookup = {}
+    for member in guild.members:
+        for name in {member.display_name, member.name}:
+            key = name.casefold()
+            lookup[key] = None if key in lookup and lookup[key] != member.id else member.id
+    return lookup
+
+
+# Read a week of leaderboards back out of the channel. The shares themselves were
+# deleted as they were counted, so these embeds are the only surviving scores.
+async def collectKrillionWeek(guild, start, end):
+    channel = resolveKrillionChannel(guild)
+    channels = [channel] if channel else readableKrillionChannels(guild)
+
+    # discord.py 1.x hands back naive UTC timestamps and wants them for the bounds,
+    # which also keeps the fetch paging over just this week instead of all history
+    after = start.astimezone(timezone.utc).replace(tzinfo=None)
+    before = end.astimezone(timezone.utc).replace(tzinfo=None)
+
+    lookup = krillionNameLookup(guild)
+    boards = []
+
+    for target in channels:
+        try:
+            async for message in target.history(limit=None, after=after, before=before):
+                if message.author.id != bot.user.id or not message.embeds:
+                    continue
+
+                embed = message.embeds[0]
+                title = embed.title if embed.title is not discord.Embed.Empty else None
+                description = (
+                    embed.description
+                    if embed.description is not discord.Embed.Empty
+                    else None
+                )
+
+                board = krillion.parse_board_embed(title, description)
+                if board is None:
+                    continue
+
+                for entry in board["entries"]:
+                    entry["user_id"] = lookup.get(entry["name"].casefold())
+
+                board["posted_at"] = (
+                    message.created_at.replace(tzinfo=timezone.utc).timestamp()
+                )
+                boards.append(board)
+        except discord.HTTPException as error:
+            print(f"Krillion: could not read #{target.name} history: {error}")
+
+    return boards
+
+
+async def postKrillionWeekly(guild, weekKey, channel=None, skipEmpty=False):
+    start, end, label = krillion.week_bounds(weekKey)
+
+    channel = channel or resolveKrillionChannel(guild)
+    if channel is None:
+        print(f"Krillion: no channel to post the weekly rollup in for {guild.name}")
+        return False
+
+    boards = await collectKrillionWeek(guild, start, end)
+    stats, truncated = krillion.aggregate_week(boards)
+    ranked, unranked, weekMean = krillion.weighted_leaderboard(stats)
+
+    if skipEmpty and not ranked and not unranked:
+        print(f"Krillion: no scores in {label} for {guild.name}, skipping the rollup")
+        return True
+
+    title, description, footer = krillion.build_weekly_content(
+        label, ranked, unranked, weekMean, truncated
+    )
+
+    report = discord.Embed(
+        title=title, description=description, colour=discord.Colour(0x1B4F72)
+    )
+    report.set_footer(text=footer)
+
+    await channel.send(embed=report, allowed_mentions=discord.AllowedMentions.none())
+    return True
+
+
+# Post each guild's rollup once the Monday 10PM Mountain boundary passes. The week
+# is recorded on disk rather than in memory, so a bot that was down at 10PM still
+# posts when it comes back and never posts the same week twice.
+async def krillionWeekly():
+    global krillionWeeklyRunning
+
+    try:
+        weekKey = krillion.weekly_window_key()
+
+        for guild in bot.guilds:
+            seen = krillionStore.get_meta(guild.id, "weekly_last_posted")
+            if seen == weekKey:
+                continue
+
+            # A guild we have never tracked starts caught up, so a fresh or replaced
+            # store cannot replay a rollup that already went out
+            if seen is None:
+                krillionStore.set_meta(guild.id, "weekly_last_posted", weekKey)
+                print(f"Krillion: weekly rollup for {guild.name} starts after {weekKey}")
+                continue
+
+            # Without a remembered board channel the bot has never posted a
+            # leaderboard here, so there is nothing to total up
+            if resolveKrillionChannel(guild) is None:
+                krillionStore.set_meta(guild.id, "weekly_last_posted", weekKey)
+                continue
+
+            if await postKrillionWeekly(guild, weekKey, skipEmpty=True):
+                krillionStore.set_meta(guild.id, "weekly_last_posted", weekKey)
+    except Exception as error:
+        print(f"Krillion: weekly rollup failed: {error}")
+    finally:
+        krillionWeeklyRunning = False
+
+
+# Post a weekly rollup on demand, counting back whole weeks from the current one
+@bot.command(name="krillionweek")
+async def krillionweek(ctx, weeksBack: int = 0):
+    if ctx.guild is None:
+        await ctx.send("Krillion rollups only work in a server")
+        return
+
+    if weeksBack < 0:
+        await ctx.send("That week has not happened yet")
+        return
+
+    weekKey = krillion.shift_week(krillion.weekly_window_key(), weeksBack)
+
+    async with ctx.typing():
+        posted = await postKrillionWeekly(ctx.guild, weekKey, channel=ctx.channel)
+
+    if not posted:
+        await ctx.send("Could not build that weekly Krillion rollup")
 
 
 @bot.event

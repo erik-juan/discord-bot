@@ -1,4 +1,5 @@
-"""Krillion daily leaderboard: share parsing, ranking and one-day JSON storage.
+"""Krillion leaderboards: share parsing, ranking, one-day JSON storage and the
+weekly rollup built by reading past leaderboards back out of the channel.
 
 Kept free of any discord imports so the logic can be exercised without a bot
 connection. bot.py wraps the rendered text in an embed.
@@ -20,11 +21,34 @@ MOUNTAIN = pytz.timezone('America/Denver')
 # Scores are wiped daily at 10:00 PM Mountain, so a "Krillion day" runs 22:00 -> 22:00.
 RESET_HOUR = 22
 
+# The weekly rollup covers the seven days closing on Monday at the same hour.
+WEEKLY_WEEKDAY = 0
+
 MAX_SCORE = 700
 RESULT_COUNT = 7
 
 STORE_VERSION = 1
 DEFAULT_DATA_FILE = '/data/krillion.json'
+
+
+def _env_number(name, fallback, cast):
+    raw = os.getenv(name)
+    if not raw:
+        return fallback
+    try:
+        value = cast(raw)
+    except ValueError:
+        return fallback
+    return value if value >= 0 else fallback
+
+
+# How many imaginary average games everyone starts the week with. Raising it makes
+# a short week of play count for less; it is measured in games, so 5 against a
+# seven-day week means you have to play most days to fully claim your average.
+WEEKLY_PRIOR = _env_number('KRILLION_WEEKLY_PRIOR', 5.0, float)
+
+# Below this many plays a person is listed but not ranked.
+WEEKLY_MIN_PLAYS = _env_number('KRILLION_WEEKLY_MIN_PLAYS', 2, int)
 
 # "Krillion #45 🦐"
 _HEADER_RE = re.compile(r'^krillion\s*#\s*(\d{1,5})\s*\U0001F990$')
@@ -149,19 +173,60 @@ def parse_krillion_message(content):
     }
 
 
-def current_window_key(now=None):
-    """Identify the active retention window by the local date it started on."""
+def _local(now=None):
     if now is None:
         now = datetime.now(pytz.utc)
     elif now.tzinfo is None:
         now = pytz.utc.localize(now)
 
-    local = now.astimezone(MOUNTAIN)
+    return now.astimezone(MOUNTAIN)
+
+
+def _mountain_moment(day, hour):
+    """Build an aware Mountain timestamp, letting pytz pick the DST offset.
+
+    Going through localize rather than replace keeps both ends of a week that
+    straddles a clock change pinned to 10:00 PM local.
+    """
+    return MOUNTAIN.localize(datetime(day.year, day.month, day.day, hour))
+
+
+def current_window_key(now=None):
+    """Identify the active retention window by the local date it started on."""
+    local = _local(now)
     start = local.date()
     if local.hour < RESET_HOUR:
         start -= timedelta(days=1)
 
     return start.isoformat()
+
+
+def weekly_window_key(now=None):
+    """Name the most recent completed week by the Monday its 10:00 PM close fell on."""
+    local = _local(now)
+    day = local.date()
+
+    day -= timedelta(days=(day.weekday() - WEEKLY_WEEKDAY) % 7)
+    if day == local.date() and local.hour < RESET_HOUR:
+        day -= timedelta(days=7)
+
+    return day.isoformat()
+
+
+def shift_week(key, weeks_back):
+    day = datetime.strptime(key, '%Y-%m-%d').date() - timedelta(days=7 * weeks_back)
+    return day.isoformat()
+
+
+def week_bounds(key):
+    """Return the UTC start and end of a weekly key, plus a label for the embed."""
+    closes_on = datetime.strptime(key, '%Y-%m-%d').date()
+
+    end = _mountain_moment(closes_on, RESET_HOUR)
+    start = _mountain_moment(closes_on - timedelta(days=7), RESET_HOUR)
+    label = 'week ending {} {}'.format(end.strftime('%a, %b'), end.day)
+
+    return start.astimezone(pytz.utc), end.astimezone(pytz.utc), label
 
 
 def rank_entries(entries):
@@ -224,8 +289,190 @@ def build_leaderboard_content(puzzle, entries):
     return title, '\n'.join(blocks), footer
 
 
+# The daily board is the only record of a day's scores that survives: the share it
+# came from is deleted once counted, and the store is wiped at 10:00 PM. These read
+# build_leaderboard_content's output back, so the two have to stay in step.
+_BOARD_TITLE_RE = re.compile(r'^\U0001F990 Krillion #(\d{1,5}) Leaderboard$')
+_BOARD_ENTRY_RE = re.compile(
+    r'^(?:\U0001F947|\U0001F948|\U0001F949|\d{1,3}\.)\s+\*\*(.+)\*\*\s+\u2014\s+(\d{1,4})$'
+)
+_BOARD_OVERFLOW_RE = re.compile(r'^\u2026and \d+ more$')
+_MARKDOWN_ESCAPED = re.compile(r'\\([\\*_~`|>])')
+
+
+def unescape_markdown(text):
+    return _MARKDOWN_ESCAPED.sub(r'\1', text)
+
+
+def parse_board_embed(title, description):
+    """Recover a day's scores from a leaderboard the bot posted earlier.
+
+    Returns None for anything that is not a daily board, so the weekly rollup
+    cannot swallow its own output or an unrelated embed.
+    """
+    if not title or not description:
+        return None
+
+    title_match = _BOARD_TITLE_RE.match(title.strip())
+    if not title_match:
+        return None
+
+    entries = []
+    truncated = False
+    for line in description.replace('\r\n', '\n').split('\n'):
+        line = line.strip()
+        if not line:
+            continue
+
+        if _BOARD_OVERFLOW_RE.match(line):
+            truncated = True
+            continue
+
+        # Anything else is the emoji line under an entry or the empty-board notice
+        entry_match = _BOARD_ENTRY_RE.match(line)
+        if not entry_match:
+            continue
+
+        score = int(entry_match.group(2))
+        if score > MAX_SCORE:
+            continue
+
+        entries.append({
+            'name': unescape_markdown(entry_match.group(1)),
+            'score': score,
+        })
+
+    return {
+        'puzzle': int(title_match.group(1)),
+        'entries': entries,
+        'truncated': truncated,
+    }
+
+
+def aggregate_week(boards):
+    """Collapse a week of boards into one record per player.
+
+    Only the newest board for each puzzle counts, since the bot rewrites the board
+    on every submission and the finished one is left in the channel.
+    """
+    latest = {}
+    for board in boards:
+        current = latest.get(board['puzzle'])
+        if current is None or board['posted_at'] >= current['posted_at']:
+            latest[board['puzzle']] = board
+
+    stats = {}
+    truncated = False
+    for puzzle in sorted(latest):
+        board = latest[puzzle]
+        truncated = truncated or board.get('truncated', False)
+
+        for entry in board['entries']:
+            # Keying on the member keeps a mid-week nickname change from splitting
+            # one player in two; an unmatched name falls back to its own text.
+            key = entry.get('user_id') or entry['name'].casefold()
+            record = stats.setdefault(key, {'name': entry['name'], 'scores': []})
+            record['name'] = entry['name']
+            record['scores'].append(entry['score'])
+
+    return stats, truncated
+
+
+def weighted_leaderboard(stats, prior=None, min_plays=None):
+    """Rank by an average pulled toward the week's mean in proportion to plays.
+
+    Everyone is treated as having started the week with `prior` games at the week's
+    own average, so those games dilute as real ones arrive: a week of playing earns
+    its average outright, while a single lucky score stays close to the middle and
+    cannot top the board. Using the week's own mean keeps this honest whether the
+    puzzles were easy or brutal.
+    """
+    if prior is None:
+        prior = WEEKLY_PRIOR
+    if min_plays is None:
+        min_plays = WEEKLY_MIN_PLAYS
+
+    scores = [score for record in stats.values() for score in record['scores']]
+    if not scores:
+        return [], [], 0.0
+
+    week_mean = sum(scores) / float(len(scores))
+
+    ranked = []
+    unranked = []
+    for record in stats.values():
+        plays = len(record['scores'])
+        mean = sum(record['scores']) / float(plays)
+        row = {
+            'name': record['name'],
+            'plays': plays,
+            'mean': mean,
+            'best': max(record['scores']),
+            'adjusted': (plays * mean + prior * week_mean) / (plays + prior),
+        }
+        (ranked if plays >= min_plays else unranked).append(row)
+
+    ranked.sort(key=lambda row: (-row['adjusted'], -row['plays'], -row['mean'], row['name'].casefold()))
+    unranked.sort(key=lambda row: (-row['mean'], row['name'].casefold()))
+
+    return ranked, unranked, week_mean
+
+
+def _plays_label(plays):
+    return '1 play' if plays == 1 else '{} plays'.format(plays)
+
+
+def build_weekly_content(label, ranked, unranked, week_mean, truncated=False, min_plays=None):
+    """Render the weekly rollup as (title, description, footer)."""
+    if min_plays is None:
+        min_plays = WEEKLY_MIN_PLAYS
+
+    title = '\U0001F990 Krillion Weekly \u2014 {}'.format(label)
+    footer = 'Week average {} \u00b7 weighted by plays \u00b7 posted Mondays at 10:00 PM Mountain Time'.format(
+        int(round(week_mean))
+    )
+    if truncated:
+        footer = 'Some daily boards were too long to list everyone \u00b7 ' + footer
+
+    if not ranked and not unranked:
+        return title, 'Nobody posted a score this week.', footer
+
+    blocks = []
+    used = 0
+    hidden = 0
+    for position, row in enumerate(ranked, start=1):
+        marker = _MEDALS.get(position, '{}.'.format(position))
+        block = '{} **{}** \u2014 {}  (avg {} \u00b7 {})'.format(
+            marker,
+            escape_markdown(row['name']),
+            int(round(row['adjusted'])),
+            int(round(row['mean'])),
+            _plays_label(row['plays']),
+        )
+        if hidden or used + len(block) > _DESCRIPTION_BUDGET:
+            hidden += 1
+            continue
+        blocks.append(block)
+        used += len(block) + 1
+
+    if hidden:
+        blocks.append('\u2026and {} more'.format(hidden))
+
+    if unranked:
+        names = ', '.join(
+            '{} ({}, {})'.format(escape_markdown(row['name']), int(round(row['mean'])), _plays_label(row['plays']))
+            for row in unranked
+        )
+        tail = '\nNot enough plays to rank (needs {}+): {}'.format(min_plays, names)
+        if used + len(tail) <= _DESCRIPTION_BUDGET:
+            blocks.append(tail)
+
+    return title, '\n'.join(blocks), footer
+
+
 class KrillionStore(object):
-    """One JSON document holding today's scores and the boards showing them."""
+    """One JSON document holding today's scores, the boards showing them, and the
+    small amount of per-guild bookkeeping that has to outlive the daily wipe."""
 
     def __init__(self, path=None):
         self.path = path or os.getenv('KRILLION_DATA_FILE', DEFAULT_DATA_FILE)
@@ -238,6 +485,7 @@ class KrillionStore(object):
             'version': STORE_VERSION,
             'window': window or current_window_key(),
             'guilds': {},
+            'meta': {},
         }
 
     def load(self):
@@ -272,6 +520,7 @@ class KrillionStore(object):
             return self.data
 
         data.setdefault('guilds', {})
+        data.setdefault('meta', {})
         data.setdefault('window', current_window_key())
         self.data = data
         return self.data
@@ -329,9 +578,25 @@ class KrillionStore(object):
         if self.data.get('window') == window:
             return False
 
+        # meta is carried across because the weekly rollup needs to remember which
+        # week it last posted, and that outlives any single day of scores.
+        meta = self.data.get('meta', {})
         self.data = self._empty(window)
+        self.data['meta'] = meta
         self.save()
         return True
+
+    def _guild_meta(self, guild_id, create=False):
+        if create:
+            return self.data.setdefault('meta', {}).setdefault(str(guild_id), {})
+        return self.data.get('meta', {}).get(str(guild_id), {})
+
+    def get_meta(self, guild_id, field, default=None):
+        return self._guild_meta(guild_id).get(field, default)
+
+    def set_meta(self, guild_id, field, value):
+        self._guild_meta(guild_id, create=True)[field] = value
+        self.save()
 
     def _puzzle_bucket(self, guild_id, puzzle, create=False):
         guilds = self.data.setdefault('guilds', {})
@@ -374,6 +639,9 @@ class KrillionStore(object):
     def set_board(self, guild_id, puzzle, channel_id, message_id):
         bucket = self._puzzle_bucket(guild_id, puzzle, create=True)
         bucket['board'] = {'channel_id': channel_id, 'message_id': message_id}
+        # Remembered past the daily wipe so the weekly rollup knows where the
+        # leaderboards live without a channel ever being configured.
+        self._guild_meta(guild_id, create=True)['last_board_channel_id'] = channel_id
         self.save()
 
     def clear_board(self, guild_id, puzzle):
