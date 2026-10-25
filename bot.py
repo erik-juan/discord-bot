@@ -1,4 +1,3 @@
-import asyncio
 import os
 import subprocess
 import time
@@ -358,7 +357,7 @@ async def fun():
     ):
         krillionWeeklyChecked = time.time()
         krillionWeeklyRunning = True
-        asyncio.ensure_future(krillionWeekly())
+        bot.loop.create_task(krillionWeekly())
 
     # Check all timers for end time
     # First pass: identify expired timers
@@ -766,15 +765,15 @@ async def postKrillionWeekly(guild, weekKey, channel=None, skipEmpty=False):
         return False
 
     boards = await collectKrillionWeek(guild, start, end)
-    stats, truncated = krillion.aggregate_week(boards)
-    ranked, unranked, weekMean = krillion.weighted_leaderboard(stats)
+    stats, puzzles, truncated = krillion.aggregate_week(boards)
+    rows = krillion.weekly_leaderboard(stats, puzzles)
 
-    if skipEmpty and not ranked and not unranked:
+    if skipEmpty and not rows:
         print(f"Krillion: no scores in {label} for {guild.name}, skipping the rollup")
         return True
 
     title, description, footer = krillion.build_weekly_content(
-        label, ranked, unranked, weekMean, truncated
+        label, rows, puzzles, truncated
     )
 
     report = discord.Embed(
