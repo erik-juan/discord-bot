@@ -30,26 +30,6 @@ RESULT_COUNT = 7
 STORE_VERSION = 1
 DEFAULT_DATA_FILE = '/data/krillion.json'
 
-
-def _env_number(name, fallback, cast):
-    raw = os.getenv(name)
-    if not raw:
-        return fallback
-    try:
-        value = cast(raw)
-    except ValueError:
-        return fallback
-    return value if value >= 0 else fallback
-
-
-# How many imaginary average games everyone starts the week with. Raising it makes
-# a short week of play count for less; it is measured in games, so 5 against a
-# seven-day week means you have to play most days to fully claim your average.
-WEEKLY_PRIOR = _env_number('KRILLION_WEEKLY_PRIOR', 5.0, float)
-
-# Below this many plays a person is listed but not ranked.
-WEEKLY_MIN_PLAYS = _env_number('KRILLION_WEEKLY_MIN_PLAYS', 2, int)
-
 # "Krillion #45 🦐"
 _HEADER_RE = re.compile(r'^krillion\s*#\s*(\d{1,5})\s*\U0001F990$')
 _SCORE_RE = re.compile(r'^(\d{1,4})$')
@@ -375,79 +355,61 @@ def aggregate_week(boards):
             record['name'] = entry['name']
             record['scores'].append(entry['score'])
 
-    return stats, truncated
+    return stats, len(latest), truncated
 
 
-def weighted_leaderboard(stats, prior=None, min_plays=None):
-    """Rank by an average pulled toward the week's mean in proportion to plays.
+def weekly_leaderboard(stats, puzzles):
+    """Average every player across the whole week, scoring a missed puzzle as zero.
 
-    Everyone is treated as having started the week with `prior` games at the week's
-    own average, so those games dilute as real ones arrive: a week of playing earns
-    its average outright, while a single lucky score stays close to the middle and
-    cannot top the board. Using the week's own mean keeps this honest whether the
-    puzzles were easy or brutal.
+    The denominator is every puzzle the week actually had rather than a flat seven,
+    so a week the game skipped does not read as everyone having missed a day.
     """
-    if prior is None:
-        prior = WEEKLY_PRIOR
-    if min_plays is None:
-        min_plays = WEEKLY_MIN_PLAYS
+    if not stats or not puzzles:
+        return []
 
-    scores = [score for record in stats.values() for score in record['scores']]
-    if not scores:
-        return [], [], 0.0
-
-    week_mean = sum(scores) / float(len(scores))
-
-    ranked = []
-    unranked = []
+    rows = []
     for record in stats.values():
-        plays = len(record['scores'])
-        mean = sum(record['scores']) / float(plays)
-        row = {
+        scores = record['scores']
+        rows.append({
             'name': record['name'],
-            'plays': plays,
-            'mean': mean,
-            'best': max(record['scores']),
-            'adjusted': (plays * mean + prior * week_mean) / (plays + prior),
-        }
-        (ranked if plays >= min_plays else unranked).append(row)
+            'plays': len(scores),
+            'played_mean': sum(scores) / float(len(scores)),
+            'average': sum(scores) / float(puzzles),
+        })
 
-    ranked.sort(key=lambda row: (-row['adjusted'], -row['plays'], -row['mean'], row['name'].casefold()))
-    unranked.sort(key=lambda row: (-row['mean'], row['name'].casefold()))
+    rows.sort(key=lambda row: (-row['average'], -row['plays'], row['name'].casefold()))
 
-    return ranked, unranked, week_mean
+    return rows
 
 
-def _plays_label(plays):
-    return '1 play' if plays == 1 else '{} plays'.format(plays)
+def _puzzles_label(puzzles):
+    return '1 puzzle' if puzzles == 1 else '{} puzzles'.format(puzzles)
 
 
-def build_weekly_content(label, ranked, unranked, week_mean, truncated=False, min_plays=None):
+def build_weekly_content(label, rows, puzzles, truncated=False):
     """Render the weekly rollup as (title, description, footer)."""
-    if min_plays is None:
-        min_plays = WEEKLY_MIN_PLAYS
-
     title = '\U0001F990 Krillion Weekly \u2014 {}'.format(label)
-    footer = 'Week average {} \u00b7 weighted by plays \u00b7 posted Mondays at 10:00 PM Mountain Time'.format(
-        int(round(week_mean))
+    footer = 'Averaged over {} \u00b7 a missed day counts as 0 \u00b7 posted Mondays at 10:00 PM Mountain Time'.format(
+        _puzzles_label(puzzles)
     )
     if truncated:
         footer = 'Some daily boards were too long to list everyone \u00b7 ' + footer
 
-    if not ranked and not unranked:
+    if not rows:
         return title, 'Nobody posted a score this week.', footer
 
     blocks = []
     used = 0
     hidden = 0
-    for position, row in enumerate(ranked, start=1):
+    for position, row in enumerate(rows, start=1):
         marker = _MEDALS.get(position, '{}.'.format(position))
-        block = '{} **{}** \u2014 {}  (avg {} \u00b7 {})'.format(
+        block = '{} **{}** \u2014 {}  ({} of {} days \u00b7 {} avg)'.format(
             marker,
             escape_markdown(row['name']),
-            int(round(row['adjusted'])),
-            int(round(row['mean'])),
-            _plays_label(row['plays']),
+            int(round(row['average'])),
+            row['plays'],
+            puzzles,
+            int(round(row['played_mean'])),
         )
         if hidden or used + len(block) > _DESCRIPTION_BUDGET:
             hidden += 1
@@ -457,15 +419,6 @@ def build_weekly_content(label, ranked, unranked, week_mean, truncated=False, mi
 
     if hidden:
         blocks.append('\u2026and {} more'.format(hidden))
-
-    if unranked:
-        names = ', '.join(
-            '{} ({}, {})'.format(escape_markdown(row['name']), int(round(row['mean'])), _plays_label(row['plays']))
-            for row in unranked
-        )
-        tail = '\nNot enough plays to rank (needs {}+): {}'.format(min_plays, names)
-        if used + len(tail) <= _DESCRIPTION_BUDGET:
-            blocks.append(tail)
 
     return title, '\n'.join(blocks), footer
 
